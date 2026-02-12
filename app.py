@@ -1,4 +1,4 @@
-# app.py — MasturBoard (Neon Postgres) — version for schema:
+# app.py — MasturBoard (Neon Postgres) — for schema:
 # message_id bigint, user_id bigint, username text,
 # event_ts timestamptz, event_ts_kyiv timestamp,
 # event_type text, original_message text
@@ -6,7 +6,7 @@
 # Streamlit Cloud → Settings → Secrets:
 # DATABASE_URL="postgresql://.../neondb?sslmode=require"
 # TABLE_NAME="events_kyiv"
-# SCHEMA_NAME="public"   (usually)
+# SCHEMA_NAME="public"
 #
 # requirements.txt:
 # streamlit
@@ -18,7 +18,7 @@
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time
 
 import numpy as np
 import pandas as pd
@@ -145,25 +145,50 @@ def fetch_event_types() -> list[str]:
     return [r[0] for r in rows]
 
 
-@st.cache_data(ttl=60 * 5)
-def fetch_logs(user: str | None, start: date, end: date, event_types: list[str] | None) -> pd.DataFrame:
-    """
-    Uses event_ts_kyiv as display timestamp (naive), and event_ts (timestamptz) as fallback.
-    Date filter is applied on event_ts_kyiv (Kyiv-local) so charts match human expectations.
-    """
-    params = {
-        "start": datetime.combine(start, datetime.min.time()),
-        "end": datetime.combine(end + timedelta(days=1), datetime.min.time()),
-    }
+# ---- NEW: robust bounds for date filter (auto from DB + hard floor) ----
+HARD_MIN_DATE = date(2023, 5, 8)
 
-    where = ['("event_ts_kyiv" >= :start AND "event_ts_kyiv" < :end)']
+@st.cache_data(ttl=60 * 30)
+def get_data_bounds() -> tuple[date, date]:
+    """
+    Returns (min_date, max_date) based on event_ts_kyiv if possible, otherwise event_ts.
+    Applies HARD_MIN_DATE as a floor so UI never goes earlier than 2023-05-08.
+    """
+    q = text(
+        f"""
+        SELECT
+          MIN(COALESCE("event_ts_kyiv", "event_ts")) AS min_ts,
+          MAX(COALESCE("event_ts_kyiv", "event_ts")) AS max_ts
+        FROM "{CFG.schema}"."{CFG.table}"
+        """
+    )
+    with ENGINE.connect() as c:
+        row = c.execute(q).first()
+    min_ts, max_ts = row[0], row[1]
+    if not min_ts or not max_ts:
+        return HARD_MIN_DATE, date.today()
+    min_d = pd.to_datetime(min_ts).date()
+    max_d = pd.to_datetime(max_ts).date()
+    if min_d < HARD_MIN_DATE:
+        min_d = HARD_MIN_DATE
+    return min_d, max_d
+
+
+@st.cache_data(ttl=60 * 5)
+def fetch_logs(user: str | None, start_dt: datetime, end_dt: datetime, event_types: list[str] | None) -> pd.DataFrame:
+    """
+    start_dt inclusive, end_dt exclusive.
+    Filters on COALESCE(event_ts_kyiv, event_ts) so NULLs won't break.
+    """
+    params = {"start": start_dt, "end": end_dt}
+
+    where = ['(COALESCE("event_ts_kyiv", "event_ts") >= :start AND COALESCE("event_ts_kyiv", "event_ts") < :end)']
 
     if user and user != "ALL":
         where.append('"username" = :user')
         params["user"] = user
 
     if event_types:
-        # safer than ANY(:arr) for many deployments
         where.append('"event_type" IN :event_types')
         params["event_types"] = tuple(event_types)
 
@@ -179,11 +204,9 @@ def fetch_logs(user: str | None, start: date, end: date, event_types: list[str] 
             "original_message"
         FROM "{CFG.schema}"."{CFG.table}"
         WHERE {" AND ".join(where)}
-        ORDER BY "event_ts_kyiv"
+        ORDER BY COALESCE("event_ts_kyiv", "event_ts")
         """
     )
-
-    # make IN :event_types work as expanding param
     q = q.bindparams(bindparam("event_types", expanding=True)) if event_types else q
 
     with ENGINE.connect() as c:
@@ -192,24 +215,31 @@ def fetch_logs(user: str | None, start: date, end: date, event_types: list[str] 
     if df.empty:
         return df
 
-    # Normalize timestamps
+    # Use event_ts_kyiv as primary timestamp; fallback to event_ts
     df["ts"] = pd.to_datetime(df["event_ts_kyiv"], errors="coerce")
-    # If event_ts_kyiv is null in some rows, fallback to event_ts
     mask = df["ts"].isna()
     if mask.any():
         df.loc[mask, "ts"] = pd.to_datetime(df.loc[mask, "event_ts"], errors="coerce")
 
     df = df.dropna(subset=["ts"]).copy()
+
+    # Derived fields
     df["d"] = df["ts"].dt.date
     df["hour"] = df["ts"].dt.hour.astype(int)
     df["weekday"] = df["ts"].dt.day_name()
     df["weekday_ua"] = df["weekday"].map(WEEKDAY_UA).fillna(df["weekday"])
     df["month"] = df["ts"].dt.to_period("M").astype(str)
+
     return df
 
 
 # ---------------- UI ----------------
 st.title("MasturBoard")
+
+# NEW: get DB bounds for proper date limits + reasonable defaults
+MIN_DATE, MAX_DATE = get_data_bounds()
+TODAY = date.today()
+MAX_DATE_UI = min(MAX_DATE, TODAY)
 
 with st.sidebar:
     st.header("Фільтри")
@@ -217,37 +247,65 @@ with st.sidebar:
     usernames = ["ALL"] + fetch_usernames()
     user = st.selectbox("username", usernames, index=0)
 
-    today = date.today()
+    # Default: last 90 days, but not earlier than MIN_DATE
+    default_end = MAX_DATE_UI
+    default_start = max(MIN_DATE, default_end - timedelta(days=90))
 
-# мінімальна дата з якої можна вибирати
-MIN_DATE = date(2023, 5, 8)
+    start_date, end_date = st.date_input(
+        "Діапазон дат",
+        value=(default_start, default_end),
+        min_value=MIN_DATE,
+        max_value=MAX_DATE_UI,
+    )
+    if isinstance(start_date, (tuple, list)):
+        start_date, end_date = start_date[0], start_date[1]
 
-# дефолтно показуємо з самого початку
-default_start = MIN_DATE
+    # NEW: time filter (Kyiv-local display time)
+    st.caption("Час береться з `event_ts_kyiv` (як на скріні).")
+    tcol1, tcol2 = st.columns(2)
+    start_time = tcol1.time_input("З часу", value=time(0, 0))
+    end_time = tcol2.time_input("По час", value=time(23, 59))
 
-start, end = st.date_input(
-    "Діапазон дат",
-    value=(default_start, today),
-    min_value=MIN_DATE,
-    max_value=today
-)
+    # Normalize time range (if user sets end earlier than start, assume it wraps to next day)
+    wraps_next_day = end_time < start_time
 
     event_types_all = fetch_event_types()
     event_types = st.multiselect("event_type (опціонально)", event_types_all, default=[])
 
     st.divider()
-    st.caption("Фільтр по даті працює по `event_ts_kyiv` (київський час).")
+    st.caption(f"Дані в базі: {MIN_DATE} → {MAX_DATE_UI}")
 
+# Build datetime bounds (inclusive start, exclusive end)
+start_dt = datetime.combine(start_date, start_time)
+end_dt = datetime.combine(end_date, end_time)
 
-df = fetch_logs(user=user, start=start, end=end, event_types=event_types or None)
+# We want end to be EXCLUSIVE; easiest: add 1 minute to include selected minute.
+# If end_time is 23:59, this becomes next day 00:00 and still works.
+end_dt_excl = end_dt + timedelta(minutes=1)
+
+# If time range wraps (e.g., 22:00 -> 02:00), fetch two windows:
+# [start_date @ start_time, end_date @ 24:00) U [start_date @ 00:00, end_date @ end_time]
+# To keep it simple, we fetch whole date range and filter by time in pandas.
+df = fetch_logs(user=user, start_dt=datetime.combine(start_date, time(0, 0)), end_dt=datetime.combine(end_date + timedelta(days=1), time(0, 0)), event_types=event_types or None)
 
 if df.empty:
     st.warning("Немає даних за вибраний період/фільтри.")
     st.stop()
 
+# Apply time filter in pandas (supports wrap)
+ts_time = df["ts"].dt.time
+if not wraps_next_day:
+    df = df[(ts_time >= start_time) & (ts_time <= end_time)].copy()
+else:
+    df = df[(ts_time >= start_time) | (ts_time <= end_time)].copy()
+
+if df.empty:
+    st.warning("Немає даних за вибраний час у межах дат.")
+    st.stop()
+
 # ---------------- Metrics ----------------
 total = len(df)
-days_in_range = (end - start).days + 1
+days_in_range = (end_date - start_date).days + 1
 active_days = pd.Series(df["d"].unique())
 active_days_count = active_days.nunique()
 avg_per_active_day = safe_div(total, active_days_count)
@@ -391,6 +449,7 @@ with right:
     st.subheader("Швидка статистика")
     st.write(f"Початок у вибірці: **{first_ts.strftime('%Y-%m-%d %H:%M:%S')}**")
     st.write(f"Кінець у вибірці: **{last_ts.strftime('%Y-%m-%d %H:%M:%S')}**")
+    st.write(f"Фільтр часу: **{start_time.strftime('%H:%M')} → {end_time.strftime('%H:%M')}**" + (" (через ніч)" if wraps_next_day else ""))
     if len(diff_min):
         st.write(f"Median interval: **{interval_median:.1f} min**")
         st.write(f"Mean interval: **{interval_mean:.1f} min**")
