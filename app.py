@@ -218,11 +218,19 @@ with st.sidebar:
     user = st.selectbox("username", usernames, index=0)
 
     today = date.today()
-    default_start = today - timedelta(days=90)
 
-    start, end = st.date_input("Діапазон дат", value=(default_start, today))
-    if isinstance(start, (tuple, list)):
-        start, end = start[0], start[1]
+# мінімальна дата з якої можна вибирати
+MIN_DATE = date(2023, 5, 8)
+
+# дефолтно показуємо з самого початку
+default_start = MIN_DATE
+
+start, end = st.date_input(
+    "Діапазон дат",
+    value=(default_start, today),
+    min_value=MIN_DATE,
+    max_value=today
+)
 
     event_types_all = fetch_event_types()
     event_types = st.multiselect("event_type (опціонально)", event_types_all, default=[])
