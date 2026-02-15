@@ -391,32 +391,3 @@ with c7:
         st.info("Мало даних, щоб показати розподіл інтервалів.")
 
 st.divider()
-
-# ---------------- Export + raw table ----------------
-left, right = st.columns([1.0, 1.6])
-with left:
-    st.subheader("Експорт")
-    export_df = df[["ts", "username", "event_type", "original_message", "message_id", "user_id"]].sort_values("ts")
-    st.download_button(
-        "Download CSV",
-        data=export_df.to_csv(index=False).encode("utf-8"),
-        file_name="masturboard_export.csv",
-        mime="text/csv",
-    )
-
-with right:
-    st.subheader("Швидка статистика")
-    st.write(f"Початок у вибірці: **{first_ts.strftime('%Y-%m-%d %H:%M:%S')}**")
-    st.write(f"Кінець у вибірці: **{last_ts.strftime('%Y-%m-%d %H:%M:%S')}**")
-    if len(diff_min):
-        st.write(f"Median interval: **{interval_median:.1f} min**")
-        st.write(f"Mean interval: **{interval_mean:.1f} min**")
-    else:
-        st.write("Інтервали: **нема** (замало подій).")
-
-with st.expander("Показати сирі події"):
-    st.dataframe(
-        df[["ts", "username", "event_type", "original_message", "message_id", "user_id"]]
-        .sort_values("ts", ascending=False),
-        use_container_width=True,
-    )
