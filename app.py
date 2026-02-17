@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -26,6 +27,8 @@ hr { opacity: 0.25; }
 """,
     unsafe_allow_html=True,
 )
+
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 WEEKDAY_UA = {
     "Monday": "Пн",
@@ -126,12 +129,16 @@ HARD_MIN_DATE = date(2023, 5, 8)
 
 
 @st.cache_data(ttl=60 * 30)
-def get_data_bounds() -> tuple[date, date]:
+def get_data_bounds_kyiv() -> tuple[date, date]:
+    """
+    Returns (min_date, max_date) in KYIV time, based on event_ts (timestamptz).
+    Applies HARD_MIN_DATE as a floor so UI never goes earlier than 2023-05-08.
+    """
     q = text(
         f"""
         SELECT
-          MIN(COALESCE("event_ts_kyiv", "event_ts")) AS min_ts,
-          MAX(COALESCE("event_ts_kyiv", "event_ts")) AS max_ts
+          MIN("event_ts") AS min_ts,
+          MAX("event_ts") AS max_ts
         FROM "{CFG.schema}"."{CFG.table}"
         """
     )
@@ -142,20 +149,34 @@ def get_data_bounds() -> tuple[date, date]:
     if not min_ts or not max_ts:
         return HARD_MIN_DATE, date.today()
 
-    min_d = pd.to_datetime(min_ts).date()
-    max_d = pd.to_datetime(max_ts).date()
-    if min_d < HARD_MIN_DATE:
-        min_d = HARD_MIN_DATE
-    return min_d, max_d
+    # Parse as tz-aware, convert to Kyiv, take date()
+    min_kyiv = pd.to_datetime(min_ts, utc=True).tz_convert(KYIV_TZ).date()
+    max_kyiv = pd.to_datetime(max_ts, utc=True).tz_convert(KYIV_TZ).date()
+
+    if min_kyiv < HARD_MIN_DATE:
+        min_kyiv = HARD_MIN_DATE
+
+    return min_kyiv, max_kyiv
 
 
 @st.cache_data(ttl=60 * 5)
-def fetch_logs(user: str | None, start_dt: datetime, end_dt_excl: datetime) -> pd.DataFrame:
-    params = {"start": start_dt, "end": end_dt_excl}
+def fetch_logs(user: str | None, start_date: date, end_date: date) -> pd.DataFrame:
+    """
+    Filters by KYIV date range, but does it correctly in SQL using event_ts (timestamptz).
 
-    where = [
-        '(COALESCE("event_ts_kyiv", "event_ts") >= :start AND COALESCE("event_ts_kyiv", "event_ts") < :end)'
-    ]
+    We build Kyiv midnight bounds and convert them to UTC for filtering.
+    """
+    # Kyiv bounds (inclusive start, exclusive end)
+    start_kyiv = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=KYIV_TZ)
+    end_kyiv_excl = datetime.combine(end_date + timedelta(days=1), datetime.min.time()).replace(tzinfo=KYIV_TZ)
+
+    # Convert to UTC for DB filter
+    start_utc = start_kyiv.astimezone(ZoneInfo("UTC"))
+    end_utc = end_kyiv_excl.astimezone(ZoneInfo("UTC"))
+
+    params = {"start": start_utc, "end": end_utc}
+
+    where = ['("event_ts" >= :start AND "event_ts" < :end)']
     if user and user != "ALL":
         where.append('"username" = :user')
         params["user"] = user
@@ -167,12 +188,11 @@ def fetch_logs(user: str | None, start_dt: datetime, end_dt_excl: datetime) -> p
             "user_id",
             "username",
             "event_ts",
-            "event_ts_kyiv",
             "event_type",
             "original_message"
         FROM "{CFG.schema}"."{CFG.table}"
         WHERE {" AND ".join(where)}
-        ORDER BY COALESCE("event_ts_kyiv", "event_ts")
+        ORDER BY "event_ts"
         """
     )
 
@@ -182,10 +202,9 @@ def fetch_logs(user: str | None, start_dt: datetime, end_dt_excl: datetime) -> p
     if df.empty:
         return df
 
-    # ✅ FIX: use event_ts (timestamptz) as the single source of truth in UTC
-    df["ts"] = pd.to_datetime(df["event_ts"], utc=True)
-
-    df = df.dropna(subset=["ts"]).copy()
+    # event_ts -> UTC aware, then convert to Kyiv for everything shown/aggregated
+    df["ts_utc"] = pd.to_datetime(df["event_ts"], utc=True)
+    df["ts"] = df["ts_utc"].dt.tz_convert(KYIV_TZ)
 
     df["d"] = df["ts"].dt.date
     df["hour"] = df["ts"].dt.hour.astype(int)
@@ -199,9 +218,9 @@ def fetch_logs(user: str | None, start_dt: datetime, end_dt_excl: datetime) -> p
 # ---------------- UI ----------------
 st.title("MasturBoard")
 
-MIN_DATE, MAX_DATE_DB = get_data_bounds()
-TODAY = date.today()
-MAX_DATE_UI = min(MAX_DATE_DB, TODAY)
+MIN_DATE, MAX_DATE_DB = get_data_bounds_kyiv()
+TODAY_KYIV = datetime.now(KYIV_TZ).date()
+MAX_DATE_UI = min(MAX_DATE_DB, TODAY_KYIV)
 
 with st.sidebar:
     st.header("Фільтри")
@@ -217,10 +236,7 @@ with st.sidebar:
     if isinstance(start_date, (tuple, list)):
         start_date, end_date = start_date[0], start_date[1]
 
-start_dt = datetime.combine(start_date, datetime.min.time())
-end_dt_excl = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
-
-df = fetch_logs(user=user, start_dt=start_dt, end_dt_excl=end_dt_excl)
+df = fetch_logs(user=user, start_date=start_date, end_date=end_date)
 
 if df.empty:
     st.warning("Немає даних за вибраний період/фільтри.")
@@ -235,12 +251,10 @@ active_days_count = active_days.nunique()
 avg_per_active_day = safe_div(total, active_days_count)
 coverage = safe_div(active_days_count, days_in_range) * 100
 
-last_ts = df["ts"].max()
-first_ts = df["ts"].min()
-
-# ✅ FIX: compute "ago" in UTC to avoid negative values
-now_utc = datetime.now(timezone.utc)
-since_last = now_utc - last_ts.to_pydatetime()
+last_ts = df["ts"].max()          # Kyiv tz-aware
+first_ts = df["ts"].min()         # Kyiv tz-aware
+now_kyiv = datetime.now(KYIV_TZ)
+since_last = now_kyiv - last_ts.to_pydatetime()  # ✅ no negatives, Kyiv-based
 
 by_hour = df.groupby("hour").size().reset_index(name="count").sort_values("hour")
 peak_hour_row = by_hour.sort_values("count", ascending=False).head(1)
@@ -363,7 +377,6 @@ st.header("🏆 Achievements")
 
 ACHIEVEMENTS = [
     {"date": "2025-07-03", "time": "16:48:52", "title": "Подрочив в горах"},
-    # Add more like this:
     # {"date": "2026-02-18", "time": "00:17:00", "title": "Нічний рейд"},
 ]
 
@@ -372,7 +385,6 @@ ach_df = pd.DataFrame(ACHIEVEMENTS)
 if ach_df.empty:
     st.info("Поки що немає ачівок.")
 else:
-    # Optional: sort by date+time descending
     ach_df["_dt"] = pd.to_datetime(ach_df["date"] + " " + ach_df["time"], errors="coerce")
     ach_df = ach_df.sort_values("_dt", ascending=False).drop(columns=["_dt"])
     st.dataframe(ach_df, use_container_width=True)
