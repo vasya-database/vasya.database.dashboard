@@ -373,50 +373,101 @@ with c7:
 st.divider()
 
 # ---------------- Goals + Achievements (side-by-side) ----------------
+# Expects these variables already computed above in your app:
+# - current_streak (int)
+# - peak_hour (int)                 # most active hour in Kyiv time
+# - start_date (date), end_date (date)
+# - daily DataFrame with column "d" (datetime64) and "count" (int)
+
 st.divider()
 st.header("🏁 Goals & 🏆 Achievements")
 
-# ✅ ТУТ ТИ ПРОСТО РЕДАГУЄШ СПИСКИ
+# ---------- Helpers ----------
+def clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
 
+def pct(x: float) -> str:
+    return f"{x*100:.1f}%"
+
+def difficulty_badge(level: str) -> str:
+    # You can use emojis as "colored circles"
+    # easy=green, medium=yellow, hard=orange, extreme=red
+    mapping = {
+        "easy": "🟢",
+        "medium": "🟡",
+        "hard": "🟠",
+        "extreme": "🔴",
+    }
+    return mapping.get(level, "⚪")
+
+def status_text(progress01: float) -> str:
+    p = clamp01(progress01)
+    if p >= 1.0:
+        return f"Done ({pct(1.0)})"
+    return f"In progress ({pct(p)})"
+
+
+# ---------- Compute progress for your 3 goals ----------
+# 1) Streak 50 days
+target_streak = 50
+p_streak = clamp01(current_streak / target_streak)
+
+# 2) Peak hour target = 11:00 (exact match)
+target_peak_hour = 11
+p_peak_hour = 1.0 if peak_hour == target_peak_hour else 0.0
+
+# 3) Full year: no missed day (evaluated over the currently selected date range)
+# If you select exactly one year in the date filter, this becomes "no missed day in that year".
+days_in_range = (end_date - start_date).days + 1
+active_days_count = int(pd.to_datetime(daily["d"]).dt.date.nunique()) if "d" in daily.columns else 0
+p_full_year = 1.0 if (days_in_range > 0 and active_days_count == days_in_range) else safe_div(active_days_count, days_in_range)
+
+
+# ---------- Goals (auto status + % ) ----------
 GOALS = [
     {
-        "goal": "Тримати streak 50 днів",
-        "target": "50 days",
-        "status": "In progress",
-        "note": "Без пропусків"
+        "difficulty": difficulty_badge("medium"),
+        "goal": "Streak 50 днів",
+        "target": "current_streak ≥ 50",
+        "status": status_text(p_streak),
+        "note": f"Зараз: {current_streak} днів (рекорд: {longest_streak})",
     },
     {
-        "goal": "Зменшити до 1 раз/день",
-        "target": "≤ 1 / day",
-        "status": "In progress",
-        "note": "Контроль частоти"
+        "difficulty": difficulty_badge("hard"),
+        "goal": "Зламати пікову годину на 11:00",
+        "target": "Most active hour == 11:00",
+        "status": status_text(p_peak_hour),
+        "note": f"Зараз peak hour: {peak_hour:02d}:00",
     },
-    # Додавай свої
-    # {"goal": "...", "target": "...", "status": "Done/In progress/Planned", "note": "..."},
+    {
+        "difficulty": difficulty_badge("extreme"),
+        "goal": "Повний рік без пропусків",
+        "target": "Active days == Days in range (100% coverage)",
+        "status": status_text(p_full_year),
+        "note": f"У вибраному періоді: {active_days_count}/{days_in_range} днів активні",
+    },
 ]
 
+goals_df = pd.DataFrame(GOALS)
+
+# ---------- Achievements (you edit manually here) ----------
+# Add your custom achievements freely (this doesn't auto-update)
 ACHIEVEMENTS = [
     {"date": "2025-07-03", "time": "16:48:52", "title": "Подрочив в горах"},
     # {"date": "2026-02-18", "time": "00:17:00", "title": "Нічний рейд"},
 ]
 
-goals_df = pd.DataFrame(GOALS)
 ach_df = pd.DataFrame(ACHIEVEMENTS)
-
-# (опціонально) підсортуємо досягнення по даті+часу
 if not ach_df.empty:
     ach_df["_dt"] = pd.to_datetime(ach_df["date"] + " " + ach_df["time"], errors="coerce")
     ach_df = ach_df.sort_values("_dt", ascending=False).drop(columns=["_dt"])
 
-# Дві колонки поруч
-left, right = st.columns([1.05, 1.0])
+# ---------- Layout: 2 tables side-by-side ----------
+left, right = st.columns([1.15, 1.0])
 
 with left:
     st.subheader("🏁 Goals")
-    if goals_df.empty:
-        st.info("Поки що немає цілей.")
-    else:
-        st.dataframe(goals_df, use_container_width=True, hide_index=True)
+    st.dataframe(goals_df, use_container_width=True, hide_index=True)
 
 with right:
     st.subheader("🏆 Achievements")
