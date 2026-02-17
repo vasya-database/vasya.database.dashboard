@@ -372,19 +372,55 @@ with c7:
 
 st.divider()
 
-# ---------------- Achievements table (editable in code) ----------------
-st.header("🏆 Achievements")
+# ---------------- Goals + Achievements (side-by-side) ----------------
+st.divider()
+st.header("🏁 Goals & 🏆 Achievements")
+
+# ✅ ТУТ ТИ ПРОСТО РЕДАГУЄШ СПИСКИ
+
+GOALS = [
+    {
+        "goal": "Тримати streak 50 днів",
+        "target": "50 days",
+        "status": "In progress",
+        "note": "Без пропусків"
+    },
+    {
+        "goal": "Зменшити до 1 раз/день",
+        "target": "≤ 1 / day",
+        "status": "In progress",
+        "note": "Контроль частоти"
+    },
+    # Додавай свої
+    # {"goal": "...", "target": "...", "status": "Done/In progress/Planned", "note": "..."},
+]
 
 ACHIEVEMENTS = [
     {"date": "2025-07-03", "time": "16:48:52", "title": "Подрочив в горах"},
     # {"date": "2026-02-18", "time": "00:17:00", "title": "Нічний рейд"},
 ]
 
+goals_df = pd.DataFrame(GOALS)
 ach_df = pd.DataFrame(ACHIEVEMENTS)
 
-if ach_df.empty:
-    st.info("Поки що немає ачівок.")
-else:
+# (опціонально) підсортуємо досягнення по даті+часу
+if not ach_df.empty:
     ach_df["_dt"] = pd.to_datetime(ach_df["date"] + " " + ach_df["time"], errors="coerce")
     ach_df = ach_df.sort_values("_dt", ascending=False).drop(columns=["_dt"])
-    st.dataframe(ach_df, use_container_width=True)
+
+# Дві колонки поруч
+left, right = st.columns([1.05, 1.0])
+
+with left:
+    st.subheader("🏁 Goals")
+    if goals_df.empty:
+        st.info("Поки що немає цілей.")
+    else:
+        st.dataframe(goals_df, use_container_width=True, hide_index=True)
+
+with right:
+    st.subheader("🏆 Achievements")
+    if ach_df.empty:
+        st.info("Поки що немає досягнень.")
+    else:
+        st.dataframe(ach_df, use_container_width=True, hide_index=True)
