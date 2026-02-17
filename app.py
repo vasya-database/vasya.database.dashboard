@@ -1,25 +1,6 @@
-# app.py — MasturBoard (Neon Postgres) — minimal filters
-# Table schema expected:
-# message_id bigint, user_id bigint, username text,
-# event_ts timestamptz, event_ts_kyiv timestamp,
-# event_type text, original_message text
-#
-# Streamlit Cloud → Settings → Secrets:
-# DATABASE_URL="postgresql://.../neondb?sslmode=require"
-# TABLE_NAME="events_kyiv"
-# SCHEMA_NAME="public"
-#
-# requirements.txt:
-# streamlit
-# pandas
-# numpy
-# plotly
-# sqlalchemy
-# psycopg2-binary
-
 import os
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -121,7 +102,6 @@ def compute_streaks(days: pd.Series) -> tuple[int, int]:
             longest = max(longest, cur)
         else:
             cur = 1
-    # current streak ending at last active day in selection
     current = 1
     for i in range(len(arr) - 1, 0, -1):
         if arr[i] == arr[i - 1] + timedelta(days=1):
@@ -142,16 +122,11 @@ def fetch_usernames() -> list[str]:
     return [r[0] for r in rows]
 
 
-# Hard floor based on your known start date
 HARD_MIN_DATE = date(2023, 5, 8)
 
 
 @st.cache_data(ttl=60 * 30)
 def get_data_bounds() -> tuple[date, date]:
-    """
-    Returns (min_date, max_date) based on COALESCE(event_ts_kyiv, event_ts).
-    Applies HARD_MIN_DATE as a floor so UI never goes earlier than 2023-05-08.
-    """
     q = text(
         f"""
         SELECT
@@ -176,16 +151,11 @@ def get_data_bounds() -> tuple[date, date]:
 
 @st.cache_data(ttl=60 * 5)
 def fetch_logs(user: str | None, start_dt: datetime, end_dt_excl: datetime) -> pd.DataFrame:
-    """
-    start_dt inclusive, end_dt_excl exclusive.
-    Filters on COALESCE(event_ts_kyiv, event_ts) so NULLs won't break.
-    """
     params = {"start": start_dt, "end": end_dt_excl}
 
     where = [
         '(COALESCE("event_ts_kyiv", "event_ts") >= :start AND COALESCE("event_ts_kyiv", "event_ts") < :end)'
     ]
-
     if user and user != "ALL":
         where.append('"username" = :user')
         params["user"] = user
@@ -212,15 +182,11 @@ def fetch_logs(user: str | None, start_dt: datetime, end_dt_excl: datetime) -> p
     if df.empty:
         return df
 
-    # Use event_ts_kyiv as primary timestamp; fallback to event_ts
-    df["ts"] = pd.to_datetime(df["event_ts_kyiv"], errors="coerce")
-    mask = df["ts"].isna()
-    if mask.any():
-        df.loc[mask, "ts"] = pd.to_datetime(df.loc[mask, "event_ts"], errors="coerce")
+    # ✅ FIX: use event_ts (timestamptz) as the single source of truth in UTC
+    df["ts"] = pd.to_datetime(df["event_ts"], utc=True)
 
     df = df.dropna(subset=["ts"]).copy()
 
-    # Derived fields
     df["d"] = df["ts"].dt.date
     df["hour"] = df["ts"].dt.hour.astype(int)
     df["weekday"] = df["ts"].dt.day_name()
@@ -239,11 +205,9 @@ MAX_DATE_UI = min(MAX_DATE_DB, TODAY)
 
 with st.sidebar:
     st.header("Фільтри")
-
     usernames = ["ALL"] + fetch_usernames()
     user = st.selectbox("username", usernames, index=0)
 
-    # IMPORTANT: default range = from very first day to last available day
     start_date, end_date = st.date_input(
         "Діапазон дат",
         value=(MIN_DATE, MAX_DATE_UI),
@@ -253,7 +217,6 @@ with st.sidebar:
     if isinstance(start_date, (tuple, list)):
         start_date, end_date = start_date[0], start_date[1]
 
-# Build datetime bounds (inclusive start, exclusive end)
 start_dt = datetime.combine(start_date, datetime.min.time())
 end_dt_excl = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
 
@@ -274,7 +237,10 @@ coverage = safe_div(active_days_count, days_in_range) * 100
 
 last_ts = df["ts"].max()
 first_ts = df["ts"].min()
-since_last = datetime.now() - last_ts.to_pydatetime()
+
+# ✅ FIX: compute "ago" in UTC to avoid negative values
+now_utc = datetime.now(timezone.utc)
+since_last = now_utc - last_ts.to_pydatetime()
 
 by_hour = df.groupby("hour").size().reset_index(name="count").sort_values("hour")
 peak_hour_row = by_hour.sort_values("count", ascending=False).head(1)
@@ -391,3 +357,22 @@ with c7:
         st.info("Мало даних, щоб показати розподіл інтервалів.")
 
 st.divider()
+
+# ---------------- Achievements table (editable in code) ----------------
+st.header("🏆 Achievements")
+
+ACHIEVEMENTS = [
+    {"date": "2025-07-03", "time": "16:48:52", "title": "Подрочив в горах"},
+    # Add more like this:
+    # {"date": "2026-02-18", "time": "00:17:00", "title": "Нічний рейд"},
+]
+
+ach_df = pd.DataFrame(ACHIEVEMENTS)
+
+if ach_df.empty:
+    st.info("Поки що немає ачівок.")
+else:
+    # Optional: sort by date+time descending
+    ach_df["_dt"] = pd.to_datetime(ach_df["date"] + " " + ach_df["time"], errors="coerce")
+    ach_df = ach_df.sort_values("_dt", ascending=False).drop(columns=["_dt"])
+    st.dataframe(ach_df, use_container_width=True)
