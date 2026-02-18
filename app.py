@@ -384,7 +384,7 @@ st.divider()
 
 # ---------------- Goals + Achievements (side-by-side) ----------------
 st.divider()
-st.header("🏁 Goals & 🏆 Achievements")
+st.header("Goals & Achievements")
 
 def difficulty_badge(level: str) -> str:
     mapping = {
@@ -415,11 +415,11 @@ if not ach_df.empty:
 
 left, right = st.columns([1.15, 1.0])
 with left:
-    st.subheader("🏁 Goals")
+    st.subheader("Goals")
     st.dataframe(goals_df, use_container_width=True, hide_index=True)
 
 with right:
-    st.subheader("🏆 Achievements")
+    st.subheader("Achievements")
     if ach_df.empty:
         st.info("Поки що немає досягнень.")
     else:
