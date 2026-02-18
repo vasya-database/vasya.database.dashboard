@@ -384,7 +384,7 @@ st.divider()
 
 # ---------------- Goals + Achievements (side-by-side) ----------------
 st.divider()
-st.header("Goals & Achievements")
+st.header("Milestones")
 
 def difficulty_badge(level: str) -> str:
     mapping = {
