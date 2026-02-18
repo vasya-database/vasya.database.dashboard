@@ -373,12 +373,6 @@ with c7:
 st.divider()
 
 # ---------------- Goals + Achievements (side-by-side) ----------------
-# Expects these variables already computed above in your app:
-# - current_streak (int)
-# - peak_hour (int)                 # most active hour in Kyiv time
-# - start_date (date), end_date (date)
-# - daily DataFrame with column "d" (datetime64) and "count" (int)
-
 st.divider()
 st.header("🏁 Goals & 🏆 Achievements")
 
@@ -390,8 +384,6 @@ def pct(x: float) -> str:
     return f"{x*100:.1f}%"
 
 def difficulty_badge(level: str) -> str:
-    # You can use emojis as "colored circles"
-    # easy=green, medium=yellow, hard=orange, extreme=red
     mapping = {
         "easy": "🟢",
         "medium": "🟡",
@@ -407,23 +399,36 @@ def status_text(progress01: float) -> str:
     return f"In progress ({pct(p)})"
 
 
-# ---------- Compute progress for your 3 goals ----------
-# 1) Streak 50 days
+# ---------- Dynamic calculations ----------
+
+# Daily counts
+daily_counts = df.groupby("d").size()
+
+max_per_day = int(daily_counts.max())
+target_10_day = 10
+p_10_day = clamp01(max_per_day / target_10_day)
+
+# Weekly counts (ISO week)
+weekly_counts = df.groupby(pd.to_datetime(df["ts"]).dt.isocalendar().week).size()
+max_per_week = int(weekly_counts.max())
+target_20_week = 20
+p_20_week = clamp01(max_per_week / target_20_week)
+
+# Streak 50
 target_streak = 50
 p_streak = clamp01(current_streak / target_streak)
 
-# 2) Peak hour target = 11:00 (exact match)
+# Peak hour 11
 target_peak_hour = 11
 p_peak_hour = 1.0 if peak_hour == target_peak_hour else 0.0
 
-# 3) Full year: no missed day (evaluated over the currently selected date range)
-# If you select exactly one year in the date filter, this becomes "no missed day in that year".
+# Full year no skip (based on selected range)
 days_in_range = (end_date - start_date).days + 1
-active_days_count = int(pd.to_datetime(daily["d"]).dt.date.nunique()) if "d" in daily.columns else 0
-p_full_year = 1.0 if (days_in_range > 0 and active_days_count == days_in_range) else safe_div(active_days_count, days_in_range)
+active_days_count = int(pd.to_datetime(daily["d"]).dt.date.nunique())
+p_full_year = 1.0 if active_days_count == days_in_range else clamp01(active_days_count / days_in_range)
 
 
-# ---------- Goals (auto status + % ) ----------
+# ---------- Goals ----------
 GOALS = [
     {
         "difficulty": difficulty_badge("medium"),
@@ -442,27 +447,40 @@ GOALS = [
     {
         "difficulty": difficulty_badge("extreme"),
         "goal": "Повний рік без пропусків",
-        "target": "Active days == Days in range (100% coverage)",
+        "target": "Active days == Days in range (100%)",
         "status": status_text(p_full_year),
         "note": f"У вибраному періоді: {active_days_count}/{days_in_range} днів активні",
+    },
+    {
+        "difficulty": difficulty_badge("extreme"),
+        "goal": "10 разів за один день",
+        "target": "Max per day ≥ 10",
+        "status": status_text(p_10_day),
+        "note": f"Максимум за день: {max_per_day}",
+    },
+    {
+        "difficulty": difficulty_badge("hard"),
+        "goal": "20 разів за тиждень",
+        "target": "Max per week ≥ 20",
+        "status": status_text(p_20_week),
+        "note": f"Максимум за тиждень: {max_per_week}",
     },
 ]
 
 goals_df = pd.DataFrame(GOALS)
 
-# ---------- Achievements (you edit manually here) ----------
-# Add your custom achievements freely (this doesn't auto-update)
+# ---------- Achievements (manual input) ----------
 ACHIEVEMENTS = [
     {"date": "2025-07-03", "time": "16:48:52", "title": "Подрочив в горах"},
-    # {"date": "2026-02-18", "time": "00:17:00", "title": "Нічний рейд"},
 ]
 
 ach_df = pd.DataFrame(ACHIEVEMENTS)
+
 if not ach_df.empty:
     ach_df["_dt"] = pd.to_datetime(ach_df["date"] + " " + ach_df["time"], errors="coerce")
     ach_df = ach_df.sort_values("_dt", ascending=False).drop(columns=["_dt"])
 
-# ---------- Layout: 2 tables side-by-side ----------
+# ---------- Layout ----------
 left, right = st.columns([1.15, 1.0])
 
 with left:
@@ -475,3 +493,4 @@ with right:
         st.info("Поки що немає досягнень.")
     else:
         st.dataframe(ach_df, use_container_width=True, hide_index=True)
+
