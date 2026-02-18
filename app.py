@@ -376,14 +376,8 @@ st.divider()
 st.divider()
 st.header("🏁 Goals & 🏆 Achievements")
 
-# ---------- Helpers ----------
-def clamp01(x: float) -> float:
-    return max(0.0, min(1.0, float(x)))
-
-def pct(x: float) -> str:
-    return f"{x*100:.1f}%"
-
 def difficulty_badge(level: str) -> str:
+    # easy=green, medium=yellow, hard=orange, extreme=red
     mapping = {
         "easy": "🟢",
         "medium": "🟡",
@@ -392,95 +386,60 @@ def difficulty_badge(level: str) -> str:
     }
     return mapping.get(level, "⚪")
 
-def status_text(progress01: float) -> str:
-    p = clamp01(progress01)
-    if p >= 1.0:
-        return f"Done ({pct(1.0)})"
-    return f"In progress ({pct(p)})"
-
-
-# ---------- Dynamic calculations ----------
-
-# Daily counts
-daily_counts = df.groupby("d").size()
-
-max_per_day = int(daily_counts.max())
-target_10_day = 10
-p_10_day = clamp01(max_per_day / target_10_day)
-
-# Weekly counts (ISO week)
-weekly_counts = df.groupby(pd.to_datetime(df["ts"]).dt.isocalendar().week).size()
-max_per_week = int(weekly_counts.max())
-target_20_week = 20
-p_20_week = clamp01(max_per_week / target_20_week)
-
-# Streak 50
-target_streak = 50
-p_streak = clamp01(current_streak / target_streak)
-
-# Peak hour 11
-target_peak_hour = 11
-p_peak_hour = 1.0 if peak_hour == target_peak_hour else 0.0
-
-# Full year no skip (based on selected range)
-days_in_range = (end_date - start_date).days + 1
-active_days_count = int(pd.to_datetime(daily["d"]).dt.date.nunique())
-p_full_year = 1.0 if active_days_count == days_in_range else clamp01(active_days_count / days_in_range)
-
-
-# ---------- Goals ----------
+# ✅ ТУТ ТИ РЕДАГУЄШ ЦІЛІ РУКАМИ (status міняєш сам: In progress / Done)
 GOALS = [
     {
         "difficulty": difficulty_badge("medium"),
         "goal": "Streak 50 днів",
         "target": "current_streak ≥ 50",
-        "status": status_text(p_streak),
-        "note": f"Зараз: {current_streak} днів (рекорд: {longest_streak})",
+        "status": "In progress",
+        "note": " ",
     },
     {
         "difficulty": difficulty_badge("hard"),
         "goal": "Зламати пікову годину на 11:00",
         "target": "Most active hour == 11:00",
-        "status": status_text(p_peak_hour),
-        "note": f"Зараз peak hour: {peak_hour:02d}:00",
+        "status": "In progress",
+        "note": " ",
     },
     {
         "difficulty": difficulty_badge("extreme"),
         "goal": "Повний рік без пропусків",
-        "target": "Active days == Days in range (100%)",
-        "status": status_text(p_full_year),
-        "note": f"У вибраному періоді: {active_days_count}/{days_in_range} днів активні",
+        "target": "Жодного пропуску 365/366 днів",
+        "status": "In progress",
+        "note": " ",
     },
     {
         "difficulty": difficulty_badge("extreme"),
         "goal": "10 разів за один день",
         "target": "Max per day ≥ 10",
-        "status": status_text(p_10_day),
-        "note": f"Максимум за день: {max_per_day}",
+        "status": "In progress",
+        "note": " ",
     },
     {
         "difficulty": difficulty_badge("hard"),
         "goal": "20 разів за тиждень",
         "target": "Max per week ≥ 20",
-        "status": status_text(p_20_week),
-        "note": f"Максимум за тиждень: {max_per_week}",
+        "status": "In progress",
+        "note": " ",
     },
 ]
 
 goals_df = pd.DataFrame(GOALS)
 
-# ---------- Achievements (manual input) ----------
+# ✅ ТУТ ТИ ВПИСУЄШ СВОЇ ДОСЯГНЕННЯ РУКАМИ
 ACHIEVEMENTS = [
     {"date": "2025-07-03", "time": "16:48:52", "title": "Подрочив в горах"},
+    # {"date": "2026-02-18", "time": "00:17:00", "title": "Нічний рейд"},
 ]
 
 ach_df = pd.DataFrame(ACHIEVEMENTS)
 
+# (опціонально) сортування досягнень по даті+часу (нові зверху)
 if not ach_df.empty:
     ach_df["_dt"] = pd.to_datetime(ach_df["date"] + " " + ach_df["time"], errors="coerce")
     ach_df = ach_df.sort_values("_dt", ascending=False).drop(columns=["_dt"])
 
-# ---------- Layout ----------
 left, right = st.columns([1.15, 1.0])
 
 with left:
@@ -493,4 +452,3 @@ with right:
         st.info("Поки що немає досягнень.")
     else:
         st.dataframe(ach_df, use_container_width=True, hide_index=True)
-
