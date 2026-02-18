@@ -130,10 +130,6 @@ HARD_MIN_DATE = date(2023, 5, 8)
 
 @st.cache_data(ttl=60 * 30)
 def get_data_bounds_kyiv() -> tuple[date, date]:
-    """
-    Returns (min_date, max_date) in KYIV time, based on event_ts (timestamptz).
-    Applies HARD_MIN_DATE as a floor so UI never goes earlier than 2023-05-08.
-    """
     q = text(
         f"""
         SELECT
@@ -149,7 +145,6 @@ def get_data_bounds_kyiv() -> tuple[date, date]:
     if not min_ts or not max_ts:
         return HARD_MIN_DATE, date.today()
 
-    # Parse as tz-aware, convert to Kyiv, take date()
     min_kyiv = pd.to_datetime(min_ts, utc=True).tz_convert(KYIV_TZ).date()
     max_kyiv = pd.to_datetime(max_ts, utc=True).tz_convert(KYIV_TZ).date()
 
@@ -161,16 +156,9 @@ def get_data_bounds_kyiv() -> tuple[date, date]:
 
 @st.cache_data(ttl=60 * 5)
 def fetch_logs(user: str | None, start_date: date, end_date: date) -> pd.DataFrame:
-    """
-    Filters by KYIV date range, but does it correctly in SQL using event_ts (timestamptz).
-
-    We build Kyiv midnight bounds and convert them to UTC for filtering.
-    """
-    # Kyiv bounds (inclusive start, exclusive end)
     start_kyiv = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=KYIV_TZ)
     end_kyiv_excl = datetime.combine(end_date + timedelta(days=1), datetime.min.time()).replace(tzinfo=KYIV_TZ)
 
-    # Convert to UTC for DB filter
     start_utc = start_kyiv.astimezone(ZoneInfo("UTC"))
     end_utc = end_kyiv_excl.astimezone(ZoneInfo("UTC"))
 
@@ -202,7 +190,6 @@ def fetch_logs(user: str | None, start_date: date, end_date: date) -> pd.DataFra
     if df.empty:
         return df
 
-    # event_ts -> UTC aware, then convert to Kyiv for everything shown/aggregated
     df["ts_utc"] = pd.to_datetime(df["event_ts"], utc=True)
     df["ts"] = df["ts_utc"].dt.tz_convert(KYIV_TZ)
 
@@ -251,10 +238,10 @@ active_days_count = active_days.nunique()
 avg_per_active_day = safe_div(total, active_days_count)
 coverage = safe_div(active_days_count, days_in_range) * 100
 
-last_ts = df["ts"].max()          # Kyiv tz-aware
-first_ts = df["ts"].min()         # Kyiv tz-aware
+last_ts = df["ts"].max()
+first_ts = df["ts"].min()
 now_kyiv = datetime.now(KYIV_TZ)
-since_last = now_kyiv - last_ts.to_pydatetime()  # ✅ no negatives, Kyiv-based
+since_last = now_kyiv - last_ts.to_pydatetime()
 
 by_hour = df.groupby("hour").size().reset_index(name="count").sort_values("hour")
 peak_hour_row = by_hour.sort_values("count", ascending=False).head(1)
@@ -280,11 +267,31 @@ peak_day_row = daily.sort_values("count", ascending=False).head(1)
 peak_day = peak_day_row["d"].dt.date.iloc[0]
 peak_day_count = int(peak_day_row["count"].iloc[0])
 
+# ✅ NEW: Peak week + Peak month (Kyiv-based)
+df_tmp = df.copy()
+iso = df_tmp["ts"].dt.isocalendar()
+df_tmp["iso_year"] = iso.year.astype(int)
+df_tmp["iso_week"] = iso.week.astype(int)
+
+weekly = df_tmp.groupby(["iso_year", "iso_week"]).size().rename("count").reset_index()
+peak_week_row = weekly.sort_values("count", ascending=False).head(1)
+peak_week_year = int(peak_week_row["iso_year"].iloc[0])
+peak_week_num = int(peak_week_row["iso_week"].iloc[0])
+peak_week_count = int(peak_week_row["count"].iloc[0])
+peak_week_label = f"{peak_week_year}-W{peak_week_num:02d}"
+
+monthly_counts = df.groupby(df["ts"].dt.to_period("M")).size().rename("count").reset_index()
+monthly_counts["month"] = monthly_counts["ts"].astype(str)  # "YYYY-MM"
+peak_month_row = monthly_counts.sort_values("count", ascending=False).head(1)
+peak_month = str(peak_month_row["month"].iloc[0])
+peak_month_count = int(peak_month_row["count"].iloc[0])
+
 current_streak, longest_streak = compute_streaks(pd.Series(daily["d"]))
 
 df_sorted = df.sort_values("ts")
 diff = df_sorted["ts"].diff().dropna()
 diff_min = diff.dt.total_seconds() / 60.0
+
 interval_median = float(np.nanmedian(diff_min)) if len(diff_min) else np.nan
 interval_mean = float(np.nanmean(diff_min)) if len(diff_min) else np.nan
 
@@ -310,11 +317,14 @@ r1[2].metric("Most active hour", f"{peak_hour:02d}:00", f"{peak_hour_count} even
 r1[3].metric("Most active weekday", peak_wd, f"{peak_wd_count} events")
 r1[4].metric("Last activity", last_ts.strftime("%b %d, %Y, %H:%M:%S"), f"{human_timedelta(since_last)} ago")
 
-r2 = st.columns(4)
+# ✅ UPDATED: added Peak week + Peak month (and kept streaks)
+r2 = st.columns(6)
 r2[0].metric("Active days", f"{active_days_count}/{days_in_range}", f"{coverage:.1f}% coverage")
 r2[1].metric("Peak day", str(peak_day), f"{peak_day_count} events")
-r2[2].metric("Streak now", f"{current_streak} days")
-r2[3].metric("Longest streak", f"{longest_streak} days")
+r2[2].metric("Peak week", peak_week_label, f"{peak_week_count} events")
+r2[3].metric("Peak month", peak_month, f"{peak_month_count} events")
+r2[4].metric("Streak now", f"{current_streak} days")
+r2[5].metric("Longest streak", f"{longest_streak} days")
 
 st.divider()
 
@@ -377,7 +387,6 @@ st.divider()
 st.header("🏁 Goals & 🏆 Achievements")
 
 def difficulty_badge(level: str) -> str:
-    # easy=green, medium=yellow, hard=orange, extreme=red
     mapping = {
         "easy": "🟢",
         "medium": "🟡",
@@ -386,62 +395,25 @@ def difficulty_badge(level: str) -> str:
     }
     return mapping.get(level, "⚪")
 
-# ✅ ТУТ ТИ РЕДАГУЄШ ЦІЛІ РУКАМИ (status міняєш сам: In progress / Done)
 GOALS = [
-    {
-        "difficulty": difficulty_badge("medium"),
-        "goal": "Streak 50 днів",
-        "target": "current_streak ≥ 50",
-        "status": "In progress",
-        "note": " ",
-    },
-    {
-        "difficulty": difficulty_badge("hard"),
-        "goal": "Зламати пікову годину на 11:00",
-        "target": "Most active hour == 11:00",
-        "status": "In progress",
-        "note": " ",
-    },
-    {
-        "difficulty": difficulty_badge("extreme"),
-        "goal": "Повний рік без пропусків",
-        "target": "Жодного пропуску 365/366 днів",
-        "status": "In progress",
-        "note": " ",
-    },
-    {
-        "difficulty": difficulty_badge("extreme"),
-        "goal": "10 разів за один день",
-        "target": "Max per day ≥ 10",
-        "status": "In progress",
-        "note": " ",
-    },
-    {
-        "difficulty": difficulty_badge("hard"),
-        "goal": "20 разів за тиждень",
-        "target": "Max per week ≥ 20",
-        "status": "In progress",
-        "note": " ",
-    },
+    {"difficulty": difficulty_badge("medium"), "goal": "Streak 50 днів", "target": "current_streak ≥ 50", "status": "In progress", "note": " "},
+    {"difficulty": difficulty_badge("hard"), "goal": "Зламати пікову годину на 11:00", "target": "Most active hour == 11:00", "status": "In progress", "note": " "},
+    {"difficulty": difficulty_badge("extreme"), "goal": "Повний рік без пропусків", "target": "Жодного пропуску 365/366 днів", "status": "In progress", "note": " "},
+    {"difficulty": difficulty_badge("extreme"), "goal": "10 разів за один день", "target": "Max per day ≥ 10", "status": "In progress", "note": " "},
+    {"difficulty": difficulty_badge("hard"), "goal": "20 разів за тиждень", "target": "Max per week ≥ 20", "status": "In progress", "note": " "},
 ]
-
 goals_df = pd.DataFrame(GOALS)
 
-# ✅ ТУТ ТИ ВПИСУЄШ СВОЇ ДОСЯГНЕННЯ РУКАМИ
 ACHIEVEMENTS = [
     {"date": "2025-07-03", "time": "16:48:52", "title": "Подрочив в горах"},
-    # {"date": "2026-02-18", "time": "00:17:00", "title": "Нічний рейд"},
 ]
-
 ach_df = pd.DataFrame(ACHIEVEMENTS)
 
-# (опціонально) сортування досягнень по даті+часу (нові зверху)
 if not ach_df.empty:
     ach_df["_dt"] = pd.to_datetime(ach_df["date"] + " " + ach_df["time"], errors="coerce")
     ach_df = ach_df.sort_values("_dt", ascending=False).drop(columns=["_dt"])
 
 left, right = st.columns([1.15, 1.0])
-
 with left:
     st.subheader("🏁 Goals")
     st.dataframe(goals_df, use_container_width=True, hide_index=True)
