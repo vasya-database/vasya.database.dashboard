@@ -3,4 +3,4 @@ pandas
 numpy
 plotly
 sqlalchemy
-psycopg2-binary
+psycopg[binary]>=3.2,<4
